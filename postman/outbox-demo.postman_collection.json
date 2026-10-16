@@ -1,0 +1,436 @@
+{
+  "info": {
+    "name": "Dual Write vs Transactional Outbox",
+    "description": "Run folders in order. Requests marked [KAFKA PAUSED] require `docker compose pause kafka` first (see docs/TESTING.md). Postman only drives the HTTP API; verify DB/Kafka effects with the psql / Kafka UI steps in TESTING.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "naiveHappyOrderId",
+      "value": ""
+    },
+    {
+      "key": "naiveLostOrderId",
+      "value": ""
+    },
+    {
+      "key": "naiveRealOutageOrderId",
+      "value": ""
+    },
+    {
+      "key": "outboxHappyOrderId",
+      "value": ""
+    },
+    {
+      "key": "outboxOutageOrderId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0 - Sanity",
+      "item": [
+        {
+          "name": "0.1 Validation error (quantity=0) -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-RED-SHOE\",\n  \"quantity\": 0,\n  \"totalAmount\": 19.98\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/outbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "outbox"
+              ]
+            },
+            "description": "Bean Validation rejects the request before any DB or Kafka work."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 - Phase 1: Dual Write BUG (naive)",
+      "item": [
+        {
+          "name": "1.1 Naive - happy path (Kafka UP)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('body has orderId', () => pm.expect(pm.response.json().orderId).to.be.a('string'));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('naiveHappyOrderId', json.orderId);",
+                  "console.log('naiveHappyOrderId =', json.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-RED-SHOE\",\n  \"quantity\": 2,\n  \"totalAmount\": 19.98\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/naive",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "naive"
+              ]
+            },
+            "description": "Kafka is healthy, so the naive code works. This is why the bug survives code review and staging."
+          }
+        },
+        {
+          "name": "1.2 Naive - simulated failure after DB commit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('503 Service Unavailable', () => pm.response.to.have.status(503));",
+                  "pm.test('message flags dual write failure', () => pm.expect(pm.response.json().message).to.include('DUAL WRITE FAILURE'));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('naiveLostOrderId', json.orderId);",
+                  "console.log('naiveLostOrderId =', json.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-RED-SHOE\",\n  \"quantity\": 2,\n  \"totalAmount\": 19.98\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/naive?simulateKafkaFailure=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "naive"
+              ],
+              "query": [
+                {
+                  "key": "simulateKafkaFailure",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Order is COMMITTED in PostgreSQL, the event is never sent. Verify with psql + Kafka UI (TESTING.md, Scenario B)."
+          }
+        },
+        {
+          "name": "1.3 [KAFKA PAUSED] Naive - real outage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('503 Service Unavailable', () => pm.response.to.have.status(503));",
+                  "pm.test('takes several seconds (producer timeouts)', () => pm.expect(pm.response.responseTime).to.be.above(3000));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('naiveRealOutageOrderId', json.orderId);",
+                  "console.log('naiveRealOutageOrderId =', json.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-RED-SHOE\",\n  \"quantity\": 2,\n  \"totalAmount\": 19.98\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/naive",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "naive"
+              ]
+            },
+            "description": "Run AFTER `docker compose pause kafka`. Blocks ~5-6s on producer timeouts, then 503. Order still committed."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 - Phase 2: Transactional Outbox",
+      "item": [
+        {
+          "name": "2.1 Outbox - happy path (Kafka UP)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('message mentions outbox', () => pm.expect(pm.response.json().message).to.include('outbox'));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('outboxHappyOrderId', json.orderId);",
+                  "console.log('outboxHappyOrderId =', json.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-BLUE-HAT\",\n  \"quantity\": 2,\n  \"totalAmount\": 19.98\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/outbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "outbox"
+              ]
+            },
+            "description": "Order + outbox row written atomically; relayer publishes within ~1s; Inventory reserves stock."
+          }
+        },
+        {
+          "name": "2.2 [KAFKA PAUSED] Outbox - write path survives outage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created even though Kafka is down', () => pm.response.to.have.status(201));",
+                  "pm.test('fast response (no Kafka on request path)', () => pm.expect(pm.response.responseTime).to.be.below(2000));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('outboxOutageOrderId', json.orderId);",
+                  "console.log('outboxOutageOrderId =', json.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-BLUE-HAT\",\n  \"quantity\": 3,\n  \"totalAmount\": 29.97\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/outbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "outbox"
+              ]
+            },
+            "description": "Run AFTER `docker compose pause kafka`. Returns immediately. Then `docker compose unpause kafka` and watch the relayer deliver."
+          }
+        },
+        {
+          "name": "2.3 Outbox - unknown SKU (business rejection)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-x\",\n  \"sku\": \"SKU-DOES-NOT-EXIST\",\n  \"quantity\": 1,\n  \"totalAmount\": 5.0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/outbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "outbox"
+              ]
+            },
+            "description": "Order accepted; Inventory logs a WARN (unknown SKU) and still records the event as processed (no infinite retry)."
+          }
+        },
+        {
+          "name": "2.4 Outbox - burst of orders (batch + SKIP LOCKED)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"cust-{{$randomInt}}\",\n  \"sku\": \"SKU-GREEN-BAG\",\n  \"quantity\": 1,\n  \"totalAmount\": 9.99\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders/outbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders",
+                "outbox"
+              ]
+            },
+            "description": "Use the Collection Runner with 20 iterations on this request only. Relayer logs 'Claimed N pending outbox event(s)'. Run two app instances (different server.port) to see SKIP LOCKED split the work."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: order-outbox-demo
+  datasource:
+    url: jdbc:postgresql://localhost:5432/orders
+    username: app
+    password: app
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none          # Flyway is the single source of truth for the schema
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        # Fail fast when the broker is unreachable (defaults are 60s / 120s).
+        # Invariant: delivery.timeout.ms >= request.timeout.ms + linger.ms
+        max.block.ms: 5000
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 6000
+    consumer:
+      group-id: inventory-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+app:
+  outbox:
+    poll-interval-ms: 1000
+    batch-size: 50
+    max-retries: 10
+    ack-timeout: 10s          # must be > producer delivery.timeout.ms
+
+logging:
+  level:
+    com.example.outbox: INFO
+    org.apache.kafka: WARN
